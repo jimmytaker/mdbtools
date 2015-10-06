@@ -54,7 +54,7 @@
 #define MDB_BIND_SIZE 16384
 
 #ifdef _WIN32
-#if BUILDING_LIBMDB
+#ifdef BUILDING_LIBMDB
 #define LIBMDB_DLL __declspec(dllexport)
 #else
 #define LIBMDB_DLL __declspec(dllimport)
