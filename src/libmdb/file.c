@@ -17,10 +17,6 @@
  */
 
 #include "mdbtools.h"
-#ifdef _WIN32
-#include <io.h>
-#endif
-//#include <inttypes.h>
 
 #ifdef DMALLOC
 #include "dmalloc.h"
@@ -137,7 +133,11 @@ static char *mdb_find_file(const char *file_name)
 
 	/* try the provided file name first */
 	if (!stat(file_name, &status)) {
-		return g_strdup(file_name);
+		char *result;
+		result = g_strdup(file_name);
+		if (!result)
+			fprintf(stderr, "Can't alloc filename\n");
+		return result;
 	}
 	
 	/* Now pull apart $MDBPATH and try those */
@@ -189,7 +189,7 @@ MdbHandle *mdb_open(const char *filename, MdbFileFlags flags)
 	mdb->f->fd = -1;
 	mdb->f->filename = mdb_find_file(filename);
 	if (!mdb->f->filename) { 
-		fprintf(stderr, "Can't alloc filename\n");
+		fprintf(stderr, "File not found\n");
 		mdb_close(mdb);
 		return NULL; 
 	}
@@ -263,7 +263,7 @@ MdbHandle *mdb_open(const char *filename, MdbFileFlags flags)
 
 	/* get the db password located at 0x42 bytes into the file */
 	for (pos=0;pos<14;pos++) {
-		j = mdb_get_int32(mdb,0x42+pos);  //warning C4133: 'function' : incompatible types - from 'MdbHandle *' to 'unsigned char *'
+		j = mdb_get_int32(mdb->pg_buf, 0x42+pos);
 		j ^= key[pos];
 		if ( j != 0)
 			mdb->f->db_passwd[pos] = j;
@@ -302,7 +302,7 @@ mdb_close(MdbHandle *mdb)
 	}
 
 	mdb_iconv_close(mdb);
-	
+
 	g_free(mdb);
 }
 /**

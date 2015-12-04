@@ -17,10 +17,9 @@
  */
 
 /* #include <windows.h> */
+#include <stdio.h>
 #include <sql.h>
 #include <sqlext.h>
-
-#include <stdio.h>
 
 
 #define SALES_PERSON_LEN 2

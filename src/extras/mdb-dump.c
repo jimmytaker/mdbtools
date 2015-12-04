@@ -1,11 +1,8 @@
 /* utility program to make a hex dump of a binary file (such as a mdb file) */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <netdb.h>
-#include <sys/types.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <time.h>
 #include <limits.h>
 #include <assert.h>

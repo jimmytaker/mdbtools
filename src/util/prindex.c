@@ -17,6 +17,7 @@
  */
 
 #include "mdbtools.h"
+
 extern char idx_to_text[];
 
 void walk_index(MdbHandle *mdb, MdbIndex *idx);

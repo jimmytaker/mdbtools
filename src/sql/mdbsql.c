@@ -16,8 +16,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
-#include "mdbsql.h"
 #include <stdarg.h>
+#include "mdbsql.h"
 
 #ifdef DMALLOC
 #include "dmalloc.h"
@@ -51,10 +51,10 @@ mdb_sql_error(MdbSQL* sql, char *fmt, ...)
 va_list ap;
 
 	va_start(ap, fmt);
-	vfprintf (stderr, fmt, ap);
-	vsprintf(sql->error_msg, fmt, ap);
+	vsnprintf(sql->error_msg, sizeof(sql->error_msg), fmt, ap);
 	va_end(ap);
-	fprintf(stderr,"\n");
+
+	fprintf(stderr, "%s\n", sql->error_msg);
 }
 
 int mdb_sql_yyinput(char *buf, int need)
@@ -208,6 +208,7 @@ mdb_sql_free_tree(MdbSargNode *tree)
 
 	if (tree->left) mdb_sql_free_tree(tree->left);
 	if (tree->right) mdb_sql_free_tree(tree->right);
+	if (tree->parent) g_free(tree->parent);
 	g_free(tree);
 }
 void
@@ -456,24 +457,18 @@ void mdb_sql_dump(MdbSQL *sql)
 }
 void mdb_sql_exit(MdbSQL *sql)
 {
-	mdb_sql_free_columns(sql->columns);
-	mdb_sql_free_tables(sql->tables);
-
-	if (sql->sarg_tree) {
-		mdb_sql_free_tree(sql->sarg_tree);
-		sql->sarg_tree = NULL;
-	}
-	g_list_free(sql->sarg_stack);
-	sql->sarg_stack = NULL;
-
-	if (sql->mdb) {
+	mdb_sql_reset(sql); // Free memory
+	if (sql->mdb)
 		mdb_close(sql->mdb);
-	}
 }
 void mdb_sql_reset(MdbSQL *sql)
 {
 	if (sql->cur_table) {
 		mdb_index_scan_free(sql->cur_table);
+		if (sql->cur_table->sarg_tree) {
+			mdb_sql_free_tree(sql->cur_table->sarg_tree);
+			sql->cur_table->sarg_tree = NULL;
+		}
 		mdb_free_tabledef(sql->cur_table);
 		sql->cur_table = NULL;
 	}

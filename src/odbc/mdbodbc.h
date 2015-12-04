@@ -12,15 +12,12 @@
  * Library General Public License for more details.
  *
  * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
+
 #ifndef _mdbodbc_h_
 #define _mdbodbc_h_
-
-#include <mdbtools.h>
-#include <mdbsql.h>
 
 #include <sql.h>
 #include <sqlext.h>
@@ -30,16 +27,22 @@
 # include <iodbcinst.h>
 #endif
 
+#include "mdbtools.h"
+#include "mdbsql.h"
+#include "connectparams.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct _henv {
-	MdbSQL *sql;	
+	MdbSQL *sql;
+	GPtrArray *connections;
 };
 struct _hdbc {
 	struct _henv *henv;
+	ConnectParams* params;
+	GPtrArray *statements;
 };
 struct _hstmt {
 	struct _hdbc *hdbc;
@@ -55,9 +58,9 @@ struct _hstmt {
 
 struct _sql_bind_info {
 	int column_number;
-	int column_bindtype;
-	int column_bindlen;
-	int *column_lenbind;
+	int column_bindtype; /* type/conversion required */
+	int column_bindlen; /* size of varaddr buffer */
+	int *column_lenbind; /* where to store length of varaddr used */
 	char *varaddr;
 	struct _sql_bind_info *next;
 };

@@ -94,8 +94,8 @@ MdbTableDef *mdb_read_table(MdbCatalogEntry *entry)
 
 	/* grab a copy of the usage map */
 	pg_row = mdb_get_int32(pg_buf, fmt->tab_usage_map_offset);
-	mdb_find_pg_row(mdb, pg_row, (void**) &buf, &row_start, &(table->map_sz));
-	table->usage_map = (unsigned char*) g_memdup(buf + row_start, table->map_sz);
+	mdb_find_pg_row(mdb, pg_row, &buf, &row_start, &(table->map_sz));
+	table->usage_map = g_memdup(buf + row_start, table->map_sz);
 	if (mdb_get_option(MDB_DEBUG_USAGE)) 
 		mdb_buffer_dump(buf, row_start, table->map_sz);
 	mdb_debug(MDB_DEBUG_USAGE,"usage map found on page %ld row %d start %d len %d",
@@ -103,8 +103,8 @@ MdbTableDef *mdb_read_table(MdbCatalogEntry *entry)
 
 	/* grab a copy of the free space page map */
 	pg_row = mdb_get_int32(pg_buf, fmt->tab_free_map_offset);
-	mdb_find_pg_row(mdb, pg_row, (void**) &buf, &row_start, &(table->freemap_sz));
-	table->free_usage_map = (unsigned char*) g_memdup(buf + row_start, table->freemap_sz);
+	mdb_find_pg_row(mdb, pg_row, &buf, &row_start, &(table->freemap_sz));
+	table->free_usage_map = g_memdup(buf + row_start, table->freemap_sz);
 	mdb_debug(MDB_DEBUG_USAGE,"free map found on page %ld row %d start %d len %d\n",
 		pg_row >> 8, pg_row & 0xff, row_start, table->freemap_sz);
 
@@ -127,7 +127,7 @@ MdbTableDef *mdb_read_table_by_name(MdbHandle *mdb, gchar *table_name, int obj_t
 	mdb_read_catalog(mdb, obj_type);
 
 	for (i=0; i<mdb->num_catalog; i++) {
-		entry = (MdbCatalogEntry *) g_ptr_array_index(mdb->catalog, i);
+		entry = g_ptr_array_index(mdb->catalog, i);
 		if (!strcasecmp(entry->object_name, table_name))
 			return mdb_read_table(entry);
 	}
@@ -199,11 +199,20 @@ void mdb_append_column(GPtrArray *columns, MdbColumn *in_col)
 }
 void mdb_free_columns(GPtrArray *columns)
 {
-	unsigned int i;
+	unsigned int i, j;
+	MdbColumn *col;
 
 	if (!columns) return;
-	for (i=0; i<columns->len; i++)
-		g_free (g_ptr_array_index(columns, i));
+	for (i=0; i<columns->len; i++) {
+		col = (MdbColumn *) g_ptr_array_index(columns, i);
+		if (col->sargs) {
+			for (j=0; j<col->sargs->len; j++) {
+				g_free( g_ptr_array_index(col->sargs, j));
+			}
+			g_ptr_array_free(col->sargs, TRUE);
+		}
+		g_free(col);
+	}
 	g_ptr_array_free(columns, TRUE);
 }
 GPtrArray *mdb_read_columns(MdbTableDef *table)

@@ -15,14 +15,14 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-#include "gmdb.h"
 
-#include <mdbtools.h>
 #include <gtk/gtkiconview.h>
 #include <gtk/gtkliststore.h>
 #include <gtk/gtkmessagedialog.h>
 #include <libgnome/gnome-i18n.h>
 #include <libgnome/gnome-config.h>
+#include "mdbtools.h"
+#include "gmdb.h"
 
 MdbHandle *mdb;
 extern int main_show_debug;
@@ -217,7 +217,9 @@ gmdb_file_open(gchar *file_path)
 	gmdb_file_shuffle_recent(file_path);
 	gmdb_file_add_recent(file_path);
 
+#ifdef SQL
 	sql->mdb = mdb;
+#endif
 	mdb_read_catalog(mdb, MDB_ANY);
 
 	for (i = 0; i < MAX_ICONVIEWS; ++i) {
@@ -271,5 +273,7 @@ gmdb_file_close_cb(GtkWidget *button, gpointer data)
 {
 	gmdb_reset_widgets (gmdbwidgets);
 	gmdb_debug_close_all();
+#if SQL
 	gmdb_sql_close_all();
+#endif
 }

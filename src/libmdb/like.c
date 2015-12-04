@@ -18,7 +18,7 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <mdbtools.h>
+#include "mdbtools.h"
 
 #ifdef DMALLOC
 #include "dmalloc.h"

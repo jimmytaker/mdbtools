@@ -16,9 +16,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include <time.h>
+#include <math.h>
 #include "mdbtools.h"
-#include "time.h"
-#include "math.h"
 
 #ifdef DMALLOC
 #include "dmalloc.h"
@@ -31,12 +31,16 @@ char *mdb_numeric_to_string(MdbHandle *mdb, int start, int prec, int scale);
 
 static int _mdb_attempt_bind(MdbHandle *mdb, 
 	MdbColumn *col, unsigned char isnull, int offset, int len);
-static char *mdb_date_to_string(MdbHandle *mdb, int start);
+static char *mdb_date_to_string(void *buf, int start);
 #ifdef MDB_COPY_OLE
 static size_t mdb_copy_ole(MdbHandle *mdb, void *dest, int start, int size);
 #endif
 
-static char date_fmt[64] = "%Y-%m-%dT%H:%M:%S"; //ISODate
+#ifdef DT_FMT_ISODATE
+static char date_fmt[64] = "%Y-%m-%dT%H:%M:%S";
+#else
+static char date_fmt[64] = "%x %X";
+#endif
 
 void mdb_set_date_fmt(const char *fmt)
 {
@@ -473,7 +477,7 @@ size_t
 mdb_ole_read_next(MdbHandle *mdb, MdbColumn *col, void *ole_ptr)
 {
 	guint32 ole_len;
-	unsigned char* buf;
+	unsigned char *buf;
 	int row_start;
 	size_t len;
 
@@ -496,7 +500,6 @@ mdb_ole_read_next(MdbHandle *mdb, MdbColumn *col, void *ole_ptr)
 	}
 	mdb_debug(MDB_DEBUG_OLE,"start %d len %d", row_start, len);
 
-	
 	if (col->bind_ptr)
 		memcpy(col->bind_ptr, buf + row_start + 4, len - 4);
 	col->cur_blob_pg_row = mdb_get_int32(buf, row_start);
@@ -507,7 +510,7 @@ size_t
 mdb_ole_read(MdbHandle *mdb, MdbColumn *col, void *ole_ptr, int chunk_size)
 {
 	guint32 ole_len;
-	unsigned char* buf;
+	unsigned char *buf;
 	int row_start;
 	size_t len;
 
@@ -537,7 +540,7 @@ mdb_ole_read(MdbHandle *mdb, MdbColumn *col, void *ole_ptr, int chunk_size)
 			col->cur_blob_pg_row >> 8);
 
 		if (mdb_find_pg_row(mdb, col->cur_blob_pg_row,
-			(void**) &buf, &row_start, &len)) {
+			&buf, &row_start, &len)) {
 			return 0;
 		}
 		mdb_debug(MDB_DEBUG_OLE,"start %d len %d", row_start, len);
@@ -548,14 +551,14 @@ mdb_ole_read(MdbHandle *mdb, MdbColumn *col, void *ole_ptr, int chunk_size)
 				mdb_buffer_dump(col->bind_ptr, 0, 16);
 		}
 		return len;
-	} else if ((ole_len & 0xff000000) == 0) {
+	} else if ((ole_len & 0xf0000000) == 0) {
 		col->cur_blob_pg_row = mdb_get_int32(ole_ptr, 4);
 		mdb_debug(MDB_DEBUG_OLE,"ole row = %d ole pg = %ld",
 			col->cur_blob_pg_row & 0xff,
 			col->cur_blob_pg_row >> 8);
 
 		if (mdb_find_pg_row(mdb, col->cur_blob_pg_row,
-			(void**) &buf, &row_start, &len)) {
+			&buf, &row_start, &len)) {
 			return 0;
 		}
 		mdb_debug(MDB_DEBUG_OLE,"start %d len %d", row_start, len);
@@ -581,18 +584,18 @@ void*
 mdb_ole_read_full(MdbHandle *mdb, MdbColumn *col, size_t *size)
 {
 	char ole_ptr[MDB_MEMO_OVERHEAD];
-	char *result = malloc(MDB_BIND_SIZE);
-	size_t result_buffer_size = MDB_BIND_SIZE;
+	char *result = malloc(MDB_BIND_SIZE * 64);
+	size_t result_buffer_size = MDB_BIND_SIZE * 64;
 	size_t len, pos;
 
 	memcpy(ole_ptr, col->bind_ptr, MDB_MEMO_OVERHEAD);
 
-	len = mdb_ole_read(mdb, col, ole_ptr, MDB_BIND_SIZE);
+	len = mdb_ole_read(mdb, col, ole_ptr, MDB_BIND_SIZE * 64);
 	memcpy(result, col->bind_ptr, len);
 	pos = len;
 	while ((len = mdb_ole_read_next(mdb, col, ole_ptr))) {
 		if (pos+len >= result_buffer_size) {
-			result_buffer_size += MDB_BIND_SIZE;
+			result_buffer_size += MDB_BIND_SIZE * 64;
 			result = realloc(result, result_buffer_size);
 		}
 		memcpy(result + pos, col->bind_ptr, len);
@@ -733,9 +736,13 @@ static char *mdb_memo_to_string(MdbHandle *mdb, int start, int size)
 			printf("row num %d start %d len %d\n",
 				pg_row & 0xff, row_start, len);
 #endif
-			if (tmpoff + len - 4 > memo_len) {
+			if (tmpoff + len - 4 > memo_len)
 				break;
-			}
+
+			/* Stop processing on zero length multiple page memo fields */
+			if (!len)
+				break;
+
 			memcpy(tmp + tmpoff, buf + row_start + 4, len - 4);
 			tmpoff += len - 4;
 		} while (( pg_row = mdb_get_int32(buf, row_start) ));
@@ -828,11 +835,12 @@ mdb_date_to_tm(double td, struct tm *t)
 }
 
 static char *
-mdb_date_to_string(MdbHandle *mdb, int start)
+mdb_date_to_string(void *buf, int start)
 {
 	struct tm t;
+#ifdef NO_NULL_DT
 	char *text;
-	double td = mdb_get_double(mdb->pg_buf, start);
+	double td = mdb_get_double(buf, start);
 
 	//If td == 0, t->tm_year == -1, which fails the debug assertion >= 0
 	if (!td) {
@@ -842,6 +850,14 @@ mdb_date_to_string(MdbHandle *mdb, int start)
 		 mdb_date_to_tm(td, &t);
 		 strftime(text, MDB_BIND_SIZE, date_fmt, &t);
 	}
+#else
+	char *text = (char *) g_malloc(MDB_BIND_SIZE);
+	double td = mdb_get_double(buf, start);
+
+	mdb_date_to_tm(td, &t);
+
+	strftime(text, MDB_BIND_SIZE, date_fmt, &t);
+#endif
 	return text;
 }
 
@@ -932,9 +948,10 @@ char *mdb_col_to_string(MdbHandle *mdb, char *buf, int start, int datatype, int 
 			if (size<0) {
 				text = g_strdup("");
 			} else {
-				text = (char *) g_malloc(size);
-				memcpy((char*)buf+start, text, size);
+				text = g_malloc(size);
+				memcpy(text, (char*)buf+start, size);
 			}
+		break;
 		case MDB_TEXT:
 			if (size<0) {
 				text = g_strdup("");
@@ -945,7 +962,7 @@ char *mdb_col_to_string(MdbHandle *mdb, char *buf, int start, int datatype, int 
 			}
 		break;
 		case MDB_DATETIME:
-			text = mdb_date_to_string(mdb, start);
+			text = mdb_date_to_string(buf, start);
 		break;
 		case MDB_MEMO:
 			text = mdb_memo_to_string(mdb, start, size);

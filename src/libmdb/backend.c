@@ -35,6 +35,7 @@
 
 static int is_init;
 GHashTable *mdb_backends;
+static void _mdb_remove_backends();
 
 /*    Access data types */
 static MdbBackendType mdb_access_types[] = {
@@ -173,6 +174,16 @@ static MdbBackendType mdb_sqlite_types[] = {
 };
 
 #ifndef JAVA
+
+enum {
+	MDB_BACKEND_ACCESS = 1,
+	MDB_BACKEND_ORACLE,
+	MDB_BACKEND_SYBASE,
+	MDB_BACKEND_POSTGRES,
+	MDB_BACKEND_MYSQL,
+	MDB_BACKEND_SQLITE,
+};
+
 static gboolean mdb_drop_backend(gpointer key, gpointer value, gpointer data);
 
 static gchar*
@@ -259,7 +270,7 @@ quote_with_squotes(const gchar* value)
 	return quote_generic(value, '\'', '\'');
 }
 
-MDB_DEPRECATED (char *, 
+MDB_DEPRECATED(char*,
 mdb_get_coltype_string(MdbBackend *backend, int col_type))
 {
 	static int warn_deprecated = 0;
@@ -277,7 +288,7 @@ mdb_get_coltype_string(MdbBackend *backend, int col_type))
 		return backend->types_table[col_type].name;
 }
 
-MDB_DEPRECATED (int,
+MDB_DEPRECATED(int,
 mdb_coltype_takes_length(MdbBackend *backend, int col_type))
 {
 	static int warn_deprecated = 0;
@@ -325,7 +336,9 @@ mdb_colbacktype_takes_length(const MdbColumn *col)
 	return type->needs_length;
 }
 
-MDB_DEPRECATED(void, mdb_init_backends()) {
+MDB_DEPRECATED(void,
+mdb_init_backends())
+{
 	fprintf(stderr, "mdb_init_backends() is DEPRECATED and does nothing. Stop calling it.\n");
 }
 
@@ -354,7 +367,6 @@ static void CCALL _mdb_remove_backends(void)
 	g_hash_table_foreach_remove(mdb_backends, mdb_drop_backend, NULL);
 	g_hash_table_destroy(mdb_backends);
 }
-
 
 /**
  * _mdb_init_backends
@@ -407,14 +419,14 @@ INITIALIZER(_mdb_init_backends)
 		"COMMENT ON TABLE %s IS %s;\n",
 		quote_schema_name_dquote);
 	mdb_register_backend("mysql",
-		MDB_SHEXP_DROPTABLE|MDB_SHEXP_CST_NOTNULL|MDB_SHEXP_CST_NOTEMPTY|MDB_SHEXP_COMMENTS|MDB_SHEXP_DEFVALUES,
+		MDB_SHEXP_DROPTABLE|MDB_SHEXP_CST_NOTNULL|MDB_SHEXP_CST_NOTEMPTY|MDB_SHEXP_INDEXES|MDB_SHEXP_DEFVALUES,
 		mdb_mysql_types, &mdb_mysql_shortdate_type, NULL,
 		"current_date", "now()",
 		"-- That file uses encoding %s\n",
 		"DROP TABLE IF EXISTS %s;\n",
 		"ALTER TABLE %s ADD CHECK (%s <>'');\n",
-		"COMMENT ON COLUMN %s.%s IS %s;\n",
-		"COMMENT ON TABLE %s IS %s;\n",
+		NULL,
+		NULL,
 		quote_schema_name_rquotes_merge);
 	mdb_register_backend("sqlite",
 		MDB_SHEXP_DROPTABLE|MDB_SHEXP_RELATIONS|MDB_SHEXP_DEFVALUES,
@@ -429,6 +441,7 @@ INITIALIZER(_mdb_init_backends)
 
 	atexit(_mdb_remove_backends);
 }
+
 void mdb_register_backend(char *backend_name, guint32 capabilities, MdbBackendType *backend_type, MdbBackendType *type_shortdate, MdbBackendType *type_autonum, const char *short_now, const char *long_now, const char *charset_statement, const char *drop_statement, const char *constaint_not_empty_statement, const char *column_comment_statement, const char *table_comment_statement, gchar* (*quote_schema_name)(const gchar*, const gchar*))
 {
 	MdbBackend *backend = (MdbBackend *) g_malloc0(sizeof(MdbBackend));
@@ -447,7 +460,9 @@ void mdb_register_backend(char *backend_name, guint32 capabilities, MdbBackendTy
 	g_hash_table_insert(mdb_backends, backend_name, backend);
 }
 
-MDB_DEPRECATED(void, mdb_remove_backends()) {
+MDB_DEPRECATED(void,
+mdb_remove_backends())
+{
 	fprintf(stderr, "mdb_remove_backends() is DEPRECATED and does nothing. Stop calling it.\n");
 }
 
@@ -474,6 +489,7 @@ int mdb_set_default_backend(MdbHandle *mdb, const char *backend_name)
 	backend = (MdbBackend *) g_hash_table_lookup(mdb_backends, backend_name);
 	if (backend) {
 		mdb->default_backend = backend;
+		g_free(mdb->backend_name); // NULL is ok
 		mdb->backend_name = (char *) g_strdup(backend_name);
 		is_init = 0;
 		return 1;
@@ -495,11 +511,17 @@ mdb_print_indexes(FILE* outfile, MdbTableDef *table, char *dbnamespace)
 	char* quoted_table_name;
 	char* index_name;
 	char* quoted_name;
+	int backend;
 	MdbHandle* mdb = table->entry->mdb;
 	MdbIndex *idx;
 	MdbColumn *col;
 
-	if (strcmp(mdb->backend_name, "postgres")) {
+
+	if (!strcmp(mdb->backend_name, "postgres")) {
+		backend = MDB_BACKEND_POSTGRES;
+	} else if (!strcmp(mdb->backend_name, "mysql")) {
+		backend = MDB_BACKEND_MYSQL;
+	} else {
 		fprintf(outfile, "-- Indexes are not implemented for %s\n\n", mdb->backend_name);
 		return;
 	}
@@ -527,12 +549,29 @@ mdb_print_indexes(FILE* outfile, MdbTableDef *table, char *dbnamespace)
 		}
 		quoted_name = mdb->default_backend->quote_schema_name(dbnamespace, index_name);
 		if (idx->index_type==1) {
-			fprintf (outfile, "ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (", quoted_table_name, quoted_name);
+			switch (backend) {
+				case MDB_BACKEND_POSTGRES:
+					fprintf (outfile, "ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (", quoted_table_name, quoted_name);
+					break;
+				case MDB_BACKEND_MYSQL:
+					fprintf (outfile, "ALTER TABLE %s ADD PRIMARY KEY (", quoted_table_name);
+					break;
+			}
 		} else {
-			fprintf(outfile, "CREATE");
-			if (idx->flags & MDB_IDX_UNIQUE)
-				fprintf (outfile, " UNIQUE");
-			fprintf(outfile, " INDEX %s ON %s (", quoted_name, quoted_table_name);
+			switch (backend) {
+				case MDB_BACKEND_POSTGRES:
+					fprintf(outfile, "CREATE");
+					if (idx->flags & MDB_IDX_UNIQUE)
+						fprintf (outfile, " UNIQUE");
+					fprintf(outfile, " INDEX %s ON %s (", quoted_name, quoted_table_name);
+					break;
+				case MDB_BACKEND_MYSQL:
+					fprintf(outfile, "ALTER TABLE %s ADD", quoted_table_name);
+					if (idx->flags & MDB_IDX_UNIQUE)
+						fprintf (outfile, " UNIQUE");
+					fprintf(outfile, " INDEX %s (", quoted_name);
+					break;
+			}
 		}
 		g_free(quoted_name);
 		free(index_name);
@@ -553,6 +592,8 @@ mdb_print_indexes(FILE* outfile, MdbTableDef *table, char *dbnamespace)
 		fprintf (outfile, ");\n");
 	}
 	fputc ('\n', outfile);
+	
+	g_free(quoted_table_name);
 }
 
 /**
@@ -570,11 +611,16 @@ mdb_print_indexess(char* buf, unsigned int *bi, unsigned int *bsize, MdbTableDef
 	char* quoted_table_name;
 	char* index_name;
 	char* quoted_name;
+	int backend;
 	MdbHandle* mdb = table->entry->mdb;
 	MdbIndex *idx;
 	MdbColumn *col;
 
-	if (strcmp(mdb->backend_name, "postgres")) {
+	if (!strcmp(mdb->backend_name, "postgres")) {
+		backend = MDB_BACKEND_POSTGRES;
+	} else if (!strcmp(mdb->backend_name, "mysql")) {
+		backend = MDB_BACKEND_MYSQL;
+	} else {
 		*bi += sprintf(buf + *bi, "-- Indexes are not implemented for %s\n\n", mdb->backend_name);
 		return;
 	}
@@ -610,12 +656,29 @@ mdb_print_indexess(char* buf, unsigned int *bi, unsigned int *bsize, MdbTableDef
 		}
 		quoted_name = mdb->default_backend->quote_schema_name(dbnamespace, index_name);
 		if (idx->index_type==1) {
-			*bi += sprintf(buf + *bi, "ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (", quoted_table_name, quoted_name);
+			switch (backend) {
+				case MDB_BACKEND_POSTGRES:
+					*bi += sprintf(buf + *bi, "ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (", quoted_table_name, quoted_name);
+					break;
+				case MDB_BACKEND_MYSQL:
+					*bi += sprintf(buf + *bi, "ALTER TABLE %s ADD PRIMARY KEY (", quoted_table_name);
+					break;
+			}
 		} else {
-			*bi += sprintf(buf + *bi, "CREATE");
-			if (idx->flags & MDB_IDX_UNIQUE)
-				*bi += sprintf(buf + *bi, " UNIQUE");
-			*bi += sprintf(buf + *bi, " INDEX %s ON %s (", quoted_name, quoted_table_name);
+			switch (backend) {
+				case MDB_BACKEND_POSTGRES:
+					*bi += sprintf(buf + *bi, "CREATE");
+					if (idx->flags & MDB_IDX_UNIQUE)
+						*bi += sprintf(buf + *bi, " UNIQUE");
+					*bi += sprintf(buf + *bi, " INDEX %s ON %s (", quoted_name, quoted_table_name);
+					break;
+				case MDB_BACKEND_MYSQL:
+					*bi += sprintf(buf + *bi, "ALTER TABLE %s ADD", quoted_table_name);
+					if (idx->flags & MDB_IDX_UNIQUE)
+						*bi += sprintf(buf + *bi, " UNIQUE");
+					*bi += sprintf(buf + *bi, " INDEX %s (", quoted_name);
+					break;
+			}
 		}
 		g_free(quoted_name); //changed from free
 		free(index_name);
@@ -644,6 +707,8 @@ mdb_print_indexess(char* buf, unsigned int *bi, unsigned int *bsize, MdbTableDef
 		*bi += sprintf(buf + *bi, ");\n");
 	}
 	*bi += sprintf(buf + *bi, "\n");
+	
+	g_free(quoted_table_name);
 }
 
 /**
@@ -671,18 +736,18 @@ mdb_get_relationships(MdbHandle *mdb, const gchar *dbnamespace, const char* tabl
 	gchar *text = NULL;  /* String to be returned */
 	static char *bound[5];  /* Bound values */
 	static MdbTableDef *table;  /* Relationships table */
-	int backend = 0;  /* Backends: 1=oracle, 2=postgres, 3=sqlite */
+	int backend = 0;
 	char *quoted_table_1, *quoted_column_1,
 	     *quoted_table_2, *quoted_column_2,
 	     *constraint_name, *quoted_constraint_name;
 	long grbit;
 
 	if (!strcmp(mdb->backend_name, "oracle")) {
-		backend = 1;
+		backend = MDB_BACKEND_ORACLE;
 	} else if (!strcmp(mdb->backend_name, "postgres")) {
-		backend = 2;
+		backend = MDB_BACKEND_POSTGRES;
 	} else if (!strcmp(mdb->backend_name, "sqlite")) {
-		backend = 3;
+		backend = MDB_BACKEND_SQLITE;
 	} else {
 		if (is_init == 0) { /* the first time through */
 			is_init = 1;
@@ -755,9 +820,9 @@ mdb_get_relationships(MdbHandle *mdb, const gchar *dbnamespace, const char* tabl
 			" does not enforce integrity.\n", NULL);
 	} else {
 		switch (backend) {
-		  case 1:  /* oracle */
-		  case 2:  /* postgres */
-		  case 3:  /* sqlite */
+		  case MDB_BACKEND_ORACLE:
+		  case MDB_BACKEND_POSTGRES:
+		  case MDB_BACKEND_SQLITE:
 			text = g_strconcat(
 				"ALTER TABLE ", quoted_table_1,
 				" ADD CONSTRAINT ", quoted_constraint_name,
@@ -779,7 +844,7 @@ mdb_get_relationships(MdbHandle *mdb, const gchar *dbnamespace, const char* tabl
 	return (char *)text;
 }
 
-void
+static void
 generate_table_schema(FILE *outfile, MdbCatalogEntry *entry, char *dbnamespace, guint32 export_options)
 {
 	MdbTableDef *table;
@@ -838,15 +903,15 @@ generate_table_schema(FILE *outfile, MdbCatalogEntry *entry, char *dbnamespace, 
 		if (export_options & MDB_SHEXP_DEFVALUES) {
 			int done = 0;
 			if (col->props) {
-				gchar *defval = (gchar*) g_hash_table_lookup(col->props->hash, "DefaultValue");
+				gchar *defval = g_hash_table_lookup(col->props->hash, "DefaultValue");
 				if (defval) {
 					size_t def_len = strlen(defval);
 					fputs(" DEFAULT ", outfile);
 					/* ugly hack to detect the type */
 					if (defval[0]=='"' && defval[def_len-1]=='"') {
 						/* this is a string */
-						gchar *output_default = (gchar*) malloc(def_len-1);
-						gchar *output_default_escaped/* = malloc(def_len-1)*/; //no need to malloc here, see two lines below
+						gchar *output_default = malloc(def_len-1);
+						gchar *output_default_escaped;
 						memcpy(output_default, defval+1, def_len-2);
 						output_default[def_len-2] = 0;
 						output_default_escaped = quote_with_squotes(output_default);
@@ -911,7 +976,7 @@ generate_table_schema(FILE *outfile, MdbCatalogEntry *entry, char *dbnamespace, 
 		g_free(quoted_name);
 	}
 
-	/* Add the constraints on table */
+	/* Add the comments on table */
 	if (export_options & MDB_SHEXP_COMMENTS) {
 		prop_value = mdb_table_get_prop(table, "Description");
 		if (prop_value) {
@@ -929,7 +994,7 @@ generate_table_schema(FILE *outfile, MdbCatalogEntry *entry, char *dbnamespace, 
 		// prints all the indexes of that table
 		mdb_print_indexes(outfile, table, dbnamespace);
 
-	g_free(quoted_table_name); //changed from free
+	g_free(quoted_table_name);
 
 	mdb_free_tabledef (table);
 }
@@ -1105,7 +1170,6 @@ generate_table_schemas(char *buf, unsigned int *bi, unsigned int *bsize, MdbCata
 	mdb_free_tabledef (table);
 }
 
-
 void
 mdb_print_schema(MdbHandle *mdb, FILE *outfile, char *tabname, char *dbnamespace, guint32 export_options)
 {
@@ -1135,7 +1199,7 @@ mdb_print_schema(MdbHandle *mdb, FILE *outfile, char *tabname, char *dbnamespace
 	}
 
 	for (i=0; i < mdb->num_catalog; i++) {
-		entry = (MdbCatalogEntry *) g_ptr_array_index (mdb->catalog, i);
+		entry = g_ptr_array_index (mdb->catalog, i);
 		if (entry->object_type == MDB_TABLE) {
 			if ((tabname && !strcmp(entry->object_name, tabname))
 			 || (!tabname && mdb_is_user_table(entry))) {

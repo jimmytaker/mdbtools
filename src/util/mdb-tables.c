@@ -17,6 +17,7 @@
  */
 
 /* this utility dumps the schema for an existing database */
+
 #include "mdbtools.h"
 
 #ifdef DMALLOC

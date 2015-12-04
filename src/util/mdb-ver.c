@@ -16,10 +16,10 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <locale.h>
 #include "mdbtools.h"
 #include "mdbver.h"
 #include "mdbprivate.h"
-#include <locale.h>
 
 #ifdef DMALLOC
 #include "dmalloc.h"

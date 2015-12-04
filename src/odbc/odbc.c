@@ -16,11 +16,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
-#ifdef HAVE_ICONV
-/* Disable ODBC wide char if iconv is not available */
-#define ENABLE_ODBC_W
-#endif
-
 #ifdef ENABLE_ODBC_W
 #define SQL_NOUNICODEMAP
 #define UNICODE
@@ -28,13 +23,9 @@
 
 #include <sql.h>
 #include <sqlext.h>
-
-#include <mdbodbc.h>
-
 #include <string.h>
 #include <stdio.h>
-
-#include "connectparams.h"
+#include "mdbodbc.h"
 
 //#define TRACE(x) fprintf(stderr,"Function %s\n", x);
 #define TRACE(x)
@@ -55,6 +46,7 @@ static SQLRETURN SQL_API _SQLFreeEnv(SQLHENV henv);
 static SQLRETURN SQL_API _SQLFreeStmt(SQLHSTMT hstmt, SQLUSMALLINT fOption);
 
 static void bind_columns (struct _hstmt*);
+static void unbind_columns (struct _hstmt*);
 
 #define FILL_FIELD(f,v,s) mdb_fill_temp_field(f,v,s,0,0,0,0)
 
@@ -105,7 +97,10 @@ TypeInfo type_info[] = {
 #define MAX_TYPE_INFO 11
 
 #ifdef ENABLE_ODBC_W
-void __attribute__ ((constructor)) my_init(){
+void my_fini();
+
+MDB_CONSTRUCTOR(my_init)
+{
 	TRACE("my_init");
 	int endian = 1;
 	const char* wcharset;
@@ -132,9 +127,12 @@ void __attribute__ ((constructor)) my_init(){
 */
 	iconv_out = iconv_open(wcharset, "UTF-8");
 	iconv_in = iconv_open("UTF-8", wcharset);
+
+	atexit(my_fini);
 }
 
-void __attribute__ ((destructor)) my_fini(){
+void my_fini()
+{
 	TRACE("my_fini");
 	if(iconv_out != (iconv_t)-1)iconv_close(iconv_out);
 	if(iconv_in != (iconv_t)-1)iconv_close(iconv_in);
@@ -181,16 +179,6 @@ static void LogError (const char* error)
    lastError[_MAX_ERROR_LEN] = '\0'; /* in case we had a long message */
 }
 
-/*
- * Driver specific connectionn information
- */
-
-typedef struct
-{
-   struct _hdbc hdbc;
-   ConnectParams* params;
-} ODBCConnection;
-
 static SQLRETURN do_connect (
    SQLHDBC hdbc,
    char *database)
@@ -222,7 +210,7 @@ static SQLRETURN SQL_API _SQLDriverConnect(
 	TRACE("_SQLDriverConnect");
 	strcpy (lastError, "");
 
-	params = ((ODBCConnection*) hdbc)->params;
+	params = ((struct _hdbc*) hdbc)->params;
 
 	if ((dsn = ExtractDSN (params, (gchar*)szConnStrIn))) {
 		if (!LookupDSN (params, dsn)){
@@ -546,14 +534,15 @@ static SQLRETURN SQL_API _SQLAllocConnect(
     SQLHDBC           *phdbc)
 {
 struct _henv *env;
-ODBCConnection* dbc;
+struct _hdbc* dbc;
 
 	TRACE("_SQLAllocConnect");
 	env = (struct _henv *) henv;
-	dbc = (SQLHDBC) g_malloc0(sizeof (ODBCConnection));
-	dbc->hdbc.henv=env;
-
+	dbc = (SQLHDBC) g_malloc0(sizeof(struct _hdbc));
+	dbc->henv=env;
+	g_ptr_array_add(env->connections, dbc);
 	dbc->params = NewConnectParams ();
+	dbc->statements = g_ptr_array_new();
 	*phdbc=dbc;
 
 	return SQL_SUCCESS;
@@ -573,10 +562,12 @@ struct _henv *env;
 
 	TRACE("_SQLAllocEnv");
 	env = (SQLHENV) g_malloc0(sizeof(struct _henv));
-	*phenv=env;
 	env->sql = mdb_sql_init();
+	env->connections = g_ptr_array_new();
+	*phenv=env;
 	return SQL_SUCCESS;
 }
+
 SQLRETURN SQL_API SQLAllocEnv(
     SQLHENV           *phenv)
 {
@@ -588,18 +579,20 @@ static SQLRETURN SQL_API _SQLAllocStmt(
     SQLHDBC            hdbc,
     SQLHSTMT          *phstmt)
 {
-	/*struct _hdbc *dbc;*/
+	struct _hdbc *dbc;
 	struct _hstmt *stmt;
 
 	TRACE("_SQLAllocStmt");
-	/*dbc = (struct _hdbc *) hdbc;*/
+	dbc = (struct _hdbc *) hdbc;
 
 	stmt = (SQLHSTMT) g_malloc0(sizeof(struct _hstmt));
-	stmt->hdbc=hdbc;
-	*phstmt = stmt;
+	stmt->hdbc=dbc;
+	g_ptr_array_add(dbc->statements, stmt);
 
+	*phstmt = stmt;
 	return SQL_SUCCESS;
 }
+
 SQLRETURN SQL_API SQLAllocStmt(
     SQLHDBC            hdbc,
     SQLHSTMT          *phstmt)
@@ -630,6 +623,7 @@ SQLRETURN SQL_API SQLBindCol(
 	/* if this is a repeat */
 	if (cur) {
 		cur->column_bindtype = fCType;
+   		cur->column_lenbind = (int *)pcbValue;
    		cur->column_bindlen = cbValueMax;
    		cur->varaddr = (char *) rgbValue;
 	} else {
@@ -679,7 +673,7 @@ static SQLRETURN SQL_API _SQLConnect(
 	TRACE("_SQLConnect");
 	strcpy (lastError, "");
 
-	params = ((ODBCConnection*) hdbc)->params;
+	params = ((struct _hdbc*) hdbc)->params;
 
 	params->dsnName = g_string_assign (params->dsnName, (gchar*)szDSN);
 
@@ -760,9 +754,11 @@ static SQLRETURN SQL_API _SQLDescribeCol(
 	MdbSQLColumn *sqlcol;
 	MdbColumn *col;
 	MdbTableDef *table;
+	SQLRETURN ret;
 
 	TRACE("_SQLDescribeCol");
 	if (icol<1 || icol>sql->num_columns) {
+		strcpy(sqlState, "07009"); // Invalid descriptor index
 		return SQL_ERROR;
 	}
 	sqlcol = g_ptr_array_index(sql->columns,icol - 1);
@@ -775,18 +771,31 @@ static SQLRETURN SQL_API _SQLDescribeCol(
 	}
 	if (i==table->num_cols) {
 		fprintf(stderr, "Column %s lost\n", (char*)sqlcol->name);
+		strcpy(sqlState, "07009"); // Invalid descriptor index
 		return SQL_ERROR;
 	}
 
+	ret = SQL_SUCCESS;
+	namelen = strlen(sqlcol->name);
+	if (pcbColName)
+		*pcbColName=namelen;
 	if (szColName) {
-		namelen = MIN(cbColNameMax,strlen(sqlcol->name));
-		strncpy((char*)szColName, sqlcol->name, namelen);
-		szColName[namelen]='\0';
-		if (pcbColName)
-			*pcbColName=namelen;
-	} else {
-		if (pcbColName)
-			*pcbColName = strlen(sqlcol->name);
+		if (cbColNameMax < 0) {
+			strcpy(sqlState, "HY090"); // Invalid string or buffer length
+			return SQL_ERROR;
+		}
+		if (namelen + 1 < cbColNameMax) {
+			// Including \0
+			strcpy((char*)szColName, sqlcol->name);
+		} else {
+			if (cbColNameMax > 1) {
+				strncpy((char*)szColName, sqlcol->name, cbColNameMax-1);
+				szColName[cbColNameMax-1] = '\0';
+			}
+			// So there is no \0 if cbColNameMax was 0
+			strcpy(sqlState, "01004"); // String data, right truncated
+			ret = SQL_SUCCESS_WITH_INFO;
+		}
 	}
 	if (pfSqlType) {
 		*pfSqlType = _odbc_get_client_type(col);
@@ -802,7 +811,7 @@ static SQLRETURN SQL_API _SQLDescribeCol(
 		*pfNullable = !col->is_fixed;
 	}
 
-	return SQL_SUCCESS;
+	return ret;
 }
 
 SQLRETURN SQL_API SQLDescribeCol(
@@ -863,6 +872,7 @@ static SQLRETURN SQL_API _SQLColAttributes(
 	MdbSQLColumn *sqlcol;
 	MdbColumn *col;
 	MdbTableDef *table;
+	SQLRETURN ret;
 
 	TRACE("_SQLColAttributes");
 	stmt = (struct _hstmt *) hstmt;
@@ -873,11 +883,14 @@ static SQLRETURN SQL_API _SQLColAttributes(
 	/* dont check column index for these */
 	switch(fDescType) {
 		case SQL_COLUMN_COUNT:
+		case SQL_DESC_COUNT:
+			*pfDesc = env->sql->num_columns;
 			return SQL_SUCCESS;
 			break;
 	}
 
 	if (icol<1 || icol>sql->num_columns) {
+		strcpy(sqlState, "07009"); // Invalid descriptor index
 		return SQL_ERROR;
 	}
 
@@ -891,28 +904,47 @@ static SQLRETURN SQL_API _SQLColAttributes(
           	}
 	}
 	if (i==table->num_cols) {
+		strcpy(sqlState, "07009"); // Invalid descriptor index
 		return SQL_ERROR;
 	}
 
 	// fprintf(stderr,"fDescType = %d\n", fDescType);
+	ret = SQL_SUCCESS;
 	switch(fDescType) {
-		case SQL_COLUMN_NAME:
-		case SQL_COLUMN_LABEL:
-			namelen = MIN(cbDescMax,strlen(sqlcol->name));
-			strncpy(rgbDesc, sqlcol->name, namelen);
-			((char *)rgbDesc)[namelen]='\0';
+		case SQL_COLUMN_NAME: case SQL_DESC_NAME:
+		case SQL_COLUMN_LABEL: /* = SQL_DESC_LABEL */
+			if (cbDescMax < 0) {
+				strcpy(sqlState, "HY090"); // Invalid string or buffer length
+				return SQL_ERROR;
+			}
+			namelen = strlen(sqlcol->name);
+			if (namelen + 1 < cbDescMax) {
+				strcpy(rgbDesc, sqlcol->name);
+			} else {
+				if (cbDescMax > 1) {
+					strncpy(rgbDesc, sqlcol->name, cbDescMax-1);
+					((char*)rgbDesc)[cbDescMax-1] = '\0';
+				}
+				// So there is no \0 if cbDescMax was 0
+				strcpy(sqlState, "01004"); // String data, right truncated
+				ret = SQL_SUCCESS_WITH_INFO;
+			}
 			break;
-		case SQL_COLUMN_TYPE:
-			*pfDesc = SQL_CHAR;
+		case SQL_COLUMN_TYPE: /* =SQL_DESC_CONCISE_TYPE */
+			//*pfDesc = SQL_CHAR;
+			*pfDesc = _odbc_get_client_type(col);
 			break;
 		case SQL_COLUMN_LENGTH:
 			break;
-		//case SQL_COLUMN_DISPLAY_SIZE:
-		case SQL_DESC_DISPLAY_SIZE:
+		case SQL_COLUMN_DISPLAY_SIZE: /* =SQL_DESC_DISPLAY_SIZE */
 			*pfDesc = mdb_col_disp_size(col);
 			break;
+		default:
+			strcpy(sqlState, "HYC00"); // 	Driver not capable
+			ret = SQL_ERROR;
+			break;
 	}
-	return SQL_SUCCESS;
+	return ret;
 }
 
 SQLRETURN SQL_API SQLColAttributes(
@@ -963,6 +995,9 @@ SQLRETURN SQL_API SQLDisconnect(
 
 	dbc = (struct _hdbc *) hdbc;
 	env = (struct _henv *) dbc->henv;
+	// Automatically close all statements:
+	while (dbc->statements->len)
+		_SQLFreeStmt(g_ptr_array_index(dbc->statements, 0), SQL_DROP);
 	mdb_sql_close(env->sql);
 
 	return SQL_SUCCESS;
@@ -1125,6 +1160,8 @@ bind_columns(struct _hstmt *stmt)
 	struct _henv *env = (struct _henv *) dbc->henv;
 	struct _sql_bind_info *cur;
 
+	TRACE("bind_columns");
+
 	if (stmt->rows_affected==0) {
 		cur = stmt->bind_head;
 		while (cur) {
@@ -1138,6 +1175,23 @@ bind_columns(struct _hstmt *stmt)
 			cur = cur->next;
 		}
 	}
+}
+
+static void
+unbind_columns(struct _hstmt *stmt)
+{
+	struct _sql_bind_info *cur, *next;
+
+	TRACE("unbind_columns");
+
+	//Free the memory allocated for bound columns
+	cur = stmt->bind_head;
+	while(cur) {
+		next = cur->next;
+		g_free(cur);
+		cur = next;
+	}
+	stmt->bind_head = NULL;
 }
 
 SQLRETURN SQL_API SQLFetch(
@@ -1189,15 +1243,28 @@ SQLRETURN SQL_API SQLFreeHandle(
 static SQLRETURN SQL_API _SQLFreeConnect(
     SQLHDBC            hdbc)
 {
-	ODBCConnection* dbc = (ODBCConnection*) hdbc;
+	struct _hdbc* dbc = (struct _hdbc*) hdbc;
+	struct _henv* env;
 
 	TRACE("_SQLFreeConnect");
 
+	env = dbc->henv;
+
+	if (dbc->statements->len) {
+		// Function sequence error
+		strcpy(sqlState, "HY010");
+		return SQL_ERROR;
+	}
+	if (!g_ptr_array_remove(env->connections, dbc))
+		return SQL_INVALID_HANDLE;
+
 	FreeConnectParams(dbc->params);
+	g_ptr_array_free(dbc->statements, TRUE);
 	g_free(dbc);
 
 	return SQL_SUCCESS;
 }
+
 SQLRETURN SQL_API SQLFreeConnect(
     SQLHDBC            hdbc)
 {
@@ -1208,7 +1275,17 @@ SQLRETURN SQL_API SQLFreeConnect(
 static SQLRETURN SQL_API _SQLFreeEnv(
     SQLHENV            henv)
 {
+	struct _henv* env = (struct _henv*)henv;
+
 	TRACE("_SQLFreeEnv");
+
+	if (env->connections->len) {
+		// Function sequence error
+		strcpy(sqlState, "HY010");
+		return SQL_ERROR;
+	}
+	g_ptr_array_free(env->connections, TRUE);
+
 	return SQL_SUCCESS;
 }
 SQLRETURN SQL_API SQLFreeEnv(
@@ -1229,9 +1306,17 @@ static SQLRETURN SQL_API _SQLFreeStmt(
 
 	TRACE("_SQLFreeStmt");
 	if (fOption==SQL_DROP) {
+		if (!g_ptr_array_remove(dbc->statements, stmt))
+			return SQL_INVALID_HANDLE;
 		mdb_sql_reset(sql);
+		unbind_columns(stmt);
 		g_free(stmt);
 	} else if (fOption==SQL_CLOSE) {
+		stmt->rows_affected = 0;
+	} else if (fOption==SQL_UNBIND) {
+		unbind_columns(stmt);
+	} else if (fOption==SQL_RESET_PARAMS) {
+		/* Bound parameters not currently implemented */
 	} else {
 	}
 	return SQL_SUCCESS;
@@ -1504,7 +1589,7 @@ static SQLRETURN SQL_API _SQLGetData(
 	MdbSQLColumn *sqlcol;
 	MdbColumn *col;
 	MdbTableDef *table;
-	int i;
+	int i, intValue;
 
 	TRACE("_SQLGetData");
 	stmt = (struct _hstmt *) hstmt;
@@ -1538,10 +1623,6 @@ static SQLRETURN SQL_API _SQLGetData(
 		strcpy(sqlState, "HY009");
 	 	return SQL_ERROR;
 	}
-	if (pcbValue && *pcbValue<0) {
-		strcpy(sqlState, "HY090");
-	 	return SQL_ERROR;
-	}
 
 	if (col->col_type == MDB_BOOL) {
 		// bool cannot be null
@@ -1561,21 +1642,96 @@ static SQLRETURN SQL_API _SQLGetData(
 		return SQL_SUCCESS;
 	}
 
+	if (fCType==SQL_ARD_TYPE) {
+		// Get _sql_bind_info
+		struct _sql_bind_info *cur;
+		for (cur = stmt->bind_head; cur; cur=cur->next) {
+			if (cur->column_number == icol) {
+				fCType = cur->column_bindtype;
+				goto found_bound_type;
+			}
+		}
+		strcpy(sqlState, "07009");
+		return SQL_ERROR;
+	}
+	found_bound_type:
+	if (fCType==SQL_C_DEFAULT)
+		fCType = _odbc_get_client_type(col);
+	if (fCType == SQL_C_CHAR)
+		goto to_c_char;
 	switch(col->col_type) {
 		case MDB_BYTE:
-			*(SQLSMALLINT*)rgbValue = mdb_get_byte(mdb->pg_buf, col->cur_value_start);
-			if (pcbValue)
-				*pcbValue = sizeof(SQLSMALLINT);
-			break;
+			intValue = (int)mdb_get_byte(mdb->pg_buf, col->cur_value_start);
+			goto to_integer_type;
 		case MDB_INT:
-			*(SQLSMALLINT*)rgbValue = (SQLSMALLINT)mdb_get_int16(mdb->pg_buf, col->cur_value_start);
-			if (pcbValue)
-				*pcbValue = sizeof(SQLSMALLINT);
-			break;
+			intValue = mdb_get_int16(mdb->pg_buf, col->cur_value_start);
+			goto to_integer_type;
 		case MDB_LONGINT:
-			*(SQLINTEGER*)rgbValue = mdb_get_int32(mdb->pg_buf, col->cur_value_start);
-			if (pcbValue)
-				*pcbValue = sizeof(SQLINTEGER);
+			intValue = mdb_get_int32(mdb->pg_buf, col->cur_value_start);
+			goto to_integer_type;
+		to_integer_type:
+			switch (fCType) {
+			case SQL_C_UTINYINT:
+				if (intValue<0 || intValue>UCHAR_MAX) {
+					strcpy(sqlState, "22003"); // Numeric value out of range
+					return SQL_ERROR;
+				}
+				*(SQLCHAR*)rgbValue = (SQLCHAR)intValue;
+				if (pcbValue)
+					*pcbValue = sizeof(SQLCHAR);
+				break;
+			case SQL_C_TINYINT:
+			case SQL_C_STINYINT:
+				if (intValue<SCHAR_MIN || intValue>SCHAR_MAX) {
+					strcpy(sqlState, "22003"); // Numeric value out of range
+					return SQL_ERROR;
+				}
+				*(SQLSCHAR*)rgbValue = (SQLSCHAR)intValue;
+				if (pcbValue)
+					*pcbValue = sizeof(SQLSCHAR);
+				break;
+			case SQL_C_USHORT:
+			case SQL_C_SHORT:
+				if (intValue<0 || intValue>USHRT_MAX) {
+					strcpy(sqlState, "22003"); // Numeric value out of range
+					return SQL_ERROR;
+				}
+				*(SQLSMALLINT*)rgbValue = (SQLSMALLINT)intValue;
+				if (pcbValue)
+					*pcbValue = sizeof(SQLSMALLINT);
+				break;
+			case SQL_C_SSHORT:
+				if (intValue<SHRT_MIN || intValue>SHRT_MAX) {
+					strcpy(sqlState, "22003"); // Numeric value out of range
+					return SQL_ERROR;
+				}
+				*(SQLSMALLINT*)rgbValue = (SQLSMALLINT)intValue;
+				if (pcbValue)
+					*pcbValue = sizeof(SQLSMALLINT);
+				break;
+			case SQL_C_ULONG:
+				if (intValue<0 || intValue>UINT_MAX) {
+					strcpy(sqlState, "22003"); // Numeric value out of range
+					return SQL_ERROR;
+				}
+				*(SQLUINTEGER*)rgbValue = (SQLINTEGER)intValue;
+				if (pcbValue)
+					*pcbValue = sizeof(SQLINTEGER);
+				break;
+			case SQL_C_LONG:
+			case SQL_C_SLONG:
+				if (intValue<LONG_MIN || intValue>LONG_MAX) {
+					strcpy(sqlState, "22003"); // Numeric value out of range
+					return SQL_ERROR;
+				}
+				*(SQLINTEGER*)rgbValue = intValue;
+				if (pcbValue)
+					*pcbValue = sizeof(SQLINTEGER);
+				break;
+			default:
+				strcpy(sqlState, "HYC00"); // Not implemented
+				return SQL_ERROR;
+			}
 			break;
 		// case MDB_MONEY: TODO
 		case MDB_FLOAT:
@@ -1588,8 +1744,10 @@ static SQLRETURN SQL_API _SQLGetData(
 			if (pcbValue)
 			  *pcbValue = sizeof(double);
 			break;
-		case MDB_DATETIME: ;
 #if ODBCVER >= 0x0300
+		// returns text if old odbc
+		case MDB_DATETIME:
+		{
 			struct tm tmp_t;
 			mdb_date_to_tm(mdb_get_double(mdb->pg_buf, col->cur_value_start), &tmp_t);
 
@@ -1617,13 +1775,18 @@ static SQLRETURN SQL_API _SQLGetData(
 					*pcbValue = sizeof(TIMESTAMP_STRUCT);
 			}
 			break;
-#endif // returns text if old odbc
-		default: ;
+		}
+#endif
+		default: /* FIXME here we assume fCType == SQL_C_CHAR */
+		to_c_char:
+		{
 			char *str = mdb_col_to_string(mdb, mdb->pg_buf,
 				col->cur_value_start, col->col_type, col->cur_value_len);
-			int len = strlen(str);
-			if (stmt->pos >= len)
+			int len = strlen(str) + 1; // including \0
+			if (stmt->pos >= len) {
+				free(str);
 				return SQL_NO_DATA;
+			}
 			if (!cbValueMax) {
 				if (pcbValue)
 					*pcbValue = len;
@@ -1647,6 +1810,7 @@ static SQLRETURN SQL_API _SQLGetData(
 			stmt->pos += len - stmt->pos;
 			free(str);
 			break;
+		}
 	}
 	return SQL_SUCCESS;
 }
@@ -1868,29 +2032,52 @@ static SQLRETURN SQL_API _SQLGetInfo(
 	TRACE("_SQLGetInfo");
 	switch (fInfoType) {
 	case SQL_MAX_STATEMENT_LEN:
-		*((SQLUINTEGER *)rgbInfoValue) = (SQLUINTEGER) 65000;
-		*pcbInfoValue = sizeof(SQLUINTEGER);
+		if (rgbInfoValue)
+			*((SQLUINTEGER *)rgbInfoValue) = (SQLUINTEGER)65000;
+		if (pcbInfoValue)
+			*pcbInfoValue = sizeof(SQLUINTEGER);
 	break;
 	case SQL_SCHEMA_USAGE:
-		*((SQLSMALLINT *)rgbInfoValue) = (SQLSMALLINT) 0;
-		*pcbInfoValue = sizeof(SQLSMALLINT);
+		if (rgbInfoValue)
+			*((SQLSMALLINT *)rgbInfoValue) = (SQLSMALLINT)0;
+		if (pcbInfoValue)
+			*pcbInfoValue = sizeof(SQLSMALLINT);
 	break;
 	case SQL_CATALOG_NAME_SEPARATOR:
-		memcpy(rgbInfoValue,".",1);
-		*pcbInfoValue = 1;
+		if (rgbInfoValue)
+			memcpy(rgbInfoValue, ".", 1);
+		if (pcbInfoValue)
+			*pcbInfoValue = 1;
 	break;
 	case SQL_CATALOG_LOCATION:
-		*((SQLSMALLINT *)rgbInfoValue) = (SQLSMALLINT) 1;
-		*pcbInfoValue = sizeof(SQLSMALLINT);
+		if (rgbInfoValue)
+			*((SQLSMALLINT *)rgbInfoValue) = (SQLSMALLINT)1;
+		if (pcbInfoValue)
+			*pcbInfoValue = sizeof(SQLSMALLINT);
 	break;
 	case SQL_IDENTIFIER_QUOTE_CHAR:
-		memcpy(rgbInfoValue,"\"",1);
-		*pcbInfoValue = 1;
+		if (rgbInfoValue)
+			memcpy(rgbInfoValue, "\"", 1);
+		if (pcbInfoValue)
+			*pcbInfoValue = 1;
 	break;
 	case SQL_DBMS_NAME:
-		memcpy(rgbInfoValue,"MDBTOOLS",8);
-		*pcbInfoValue = 8;
+		if (rgbInfoValue)
+			strncpy(rgbInfoValue, "MDBTOOLS", cbInfoValueMax);
+		if (pcbInfoValue)
+			*pcbInfoValue = 9;
 	break;
+	case SQL_DBMS_VER:
+		if (rgbInfoValue)
+			strncpy(rgbInfoValue, VERSION, cbInfoValueMax);
+		if (pcbInfoValue)
+			*pcbInfoValue = sizeof(VERSION)+1;
+	break;
+	default:
+		if (pcbInfoValue)
+			*pcbInfoValue = 0;
+		strcpy(sqlState, "HYC00");
+		return SQL_ERROR;
 	}
 
 	return SQL_SUCCESS;
