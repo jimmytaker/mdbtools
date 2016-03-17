@@ -124,7 +124,41 @@ static void RC4(RC4_KEY *key, int buffer_len, unsigned char * buff)
  * Return value: gchar pointer to absolute path. Caller is responsible for
  * freeing.
  **/
+#ifdef WIN32
+static wchar_t *mdb_find_file(const wchar_t *file_name)
+{
+	struct _stat64i32 status;
+	gchar *mdbpath, **dir, *tmpfname;
+	unsigned int i = 0;
 
+	/* try the provided file name first */
+	if (!_wstat64i32(file_name, &status)) {
+		wchar_t *result = (wchar_t *) g_malloc((wcslen(file_name) + 1) * sizeof(wchar_t));
+		if (!result)
+			fprintf(stderr, "Can't alloc filename\n");
+		wcscpy(result, file_name);
+		return result;
+	}
+	//TODO I do not understand this snippet to translate it
+	///* Now pull apart $MDBPATH and try those */
+	//mdbpath = (gchar *) getenv("MDBPATH");
+	///* no path, can't find file */
+	//if (!mdbpath || !strlen(mdbpath)) return NULL;
+
+	//dir = g_strsplit(mdbpath, ":", 0); 
+	//while (dir[i]) {
+	//	if (!strlen(dir[i])) continue;
+	//	tmpfname = g_strconcat(dir[i++], "/", file_name, NULL);
+	//	if (!stat(tmpfname, &status)) {
+	//		g_strfreev(dir);
+	//		return tmpfname;
+	//	}
+	//	g_free(tmpfname);
+	//}
+	//g_strfreev(dir);
+	return NULL;
+}
+#else
 static char *mdb_find_file(const char *file_name)
 {
 	struct stat status;
@@ -158,6 +192,7 @@ static char *mdb_find_file(const char *file_name)
 	g_strfreev(dir);
 	return NULL;
 }
+#endif
 /**
  * mdb_open:
  * @filename: path to MDB (database) file
@@ -169,7 +204,11 @@ static char *mdb_find_file(const char *file_name)
  *
  * Return value: pointer to MdbHandle structure.
  **/
+#ifdef WIN32
+MdbHandle *mdb_open(const wchar_t *filename, MdbFileFlags flags)
+#else
 MdbHandle *mdb_open(const char *filename, MdbFileFlags flags)
+#endif
 {
 	MdbHandle *mdb;
 	int key[] = {0x86, 0xfb, 0xec, 0x37, 0x5d, 0x44, 0x9c, 0xfa, 0xc6, 0x5e, 0x28, 0xe6, 0x13, 0xb6};
@@ -202,12 +241,17 @@ MdbHandle *mdb_open(const char *filename, MdbFileFlags flags)
 
 #ifdef _WIN32
 	open_flags |= O_BINARY;
+	mdb->f->fd = _wopen(mdb->f->filename, open_flags);
+#else
+	mdb->f->fd = open(mdb->f->filename, open_flags);
 #endif
 
-	mdb->f->fd = open(mdb->f->filename, open_flags);
-
 	if (mdb->f->fd==-1) {
+#ifdef _WIN32
+		fwprintf(stderr,L"Couldn't open file %s\n",mdb->f->filename); 
+#else
 		fprintf(stderr,"Couldn't open file %s\n",mdb->f->filename); 
+#endif
 		mdb_close(mdb);
 		return NULL;
 	}
@@ -252,10 +296,16 @@ MdbHandle *mdb_open(const char *filename, MdbFileFlags flags)
 		open_flags = O_RDONLY;
 #ifdef _WIN32
 		open_flags |= O_BINARY;
-#endif
+		mdb->f->fd = _wopen(mdb->f->filename, open_flags);
+#else
 		mdb->f->fd = open(mdb->f->filename, open_flags);
+#endif
 		if (mdb->f->fd==-1) {
+#ifdef _WIN32
+			fwprintf(stderr, L"Couldn't ropen file %s in read only\n", mdb->f->filename);
+#else
 			fprintf(stderr, "Couldn't ropen file %s in read only\n", mdb->f->filename);
+#endif
 			mdb_close(mdb);
 			return NULL;
 		}

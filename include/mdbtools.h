@@ -233,7 +233,11 @@ typedef struct {
 typedef struct {
 	int           fd;
 	gboolean      writable;
+#ifdef WIN32
+	wchar_t       *filename;
+#else
 	char          *filename;
+#endif
 	guint32		jet_version;
 	guint32		db_key;
 	char		db_passwd[14];
@@ -475,7 +479,11 @@ extern LIBMDB_DLL int    mdb_pg_get_int16(MdbHandle *mdb, int offset);
 extern LIBMDB_DLL long   mdb_pg_get_int32(MdbHandle *mdb, int offset);
 extern LIBMDB_DLL float  mdb_pg_get_single(MdbHandle *mdb, int offset);
 extern LIBMDB_DLL double mdb_pg_get_double(MdbHandle *mdb, int offset);
+#ifdef WIN32
+extern LIBMDB_DLL MdbHandle *mdb_open(const wchar_t *filename, MdbFileFlags flags);
+#else
 extern LIBMDB_DLL MdbHandle *mdb_open(const char *filename, MdbFileFlags flags);
+#endif
 extern LIBMDB_DLL void mdb_close(MdbHandle *mdb);
 extern LIBMDB_DLL MdbHandle *mdb_clone_handle(MdbHandle *mdb);
 extern LIBMDB_DLL void mdb_swap_pgbuf(MdbHandle *mdb);
